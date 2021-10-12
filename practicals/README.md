@@ -1,0 +1,1 @@
+# DD2412_Practical_Aleatoric_Uncertainty_and_simpleVI
