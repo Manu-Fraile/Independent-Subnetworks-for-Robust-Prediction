@@ -1,1 +1,1 @@
-# Independent-Subnetworks-for-Robust-Prediction
+# Out Of Distribution detection using MIMO
