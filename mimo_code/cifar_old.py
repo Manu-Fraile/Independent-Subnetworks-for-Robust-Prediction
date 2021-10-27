@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Edward2 Authors.
+# Copyright 2020 The <> Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,9 +14,6 @@
 # limitations under the License.
 
 # Lint as: python3
-
-# Code is copied from: https://github.com/google/edward2/blob/main/experimental/mimo/cifar.py
-# And modified to get running on local environment..
 """Multi-headed wide ResNet 28-10 on CIFAR-10 and CIFAR-100."""
 import functools
 import os
@@ -25,14 +22,10 @@ from absl import app
 from absl import flags
 from absl import logging
 
-import cifar_model  # ADDED
-# REMOVED from experimental.mimo import cifar_model  # local file import
-import robustness_metrics as rm
+import cifar_model  # local file import
 import tensorflow as tf
 import tensorflow_datasets as tfds
-import uncertainty_baselines as ub
-import baselines.utils as utils # ADDED this!
-# from uncertainty_baselines.baselines.cifar import utils
+from uncertainty_baselines.baselines.cifar import utils
 import uncertainty_metrics as um
 
 flags.DEFINE_integer('ensemble_size', 4, 'Size of ensemble.')
@@ -58,7 +51,6 @@ flags.DEFINE_list('lr_decay_epochs', ['80', '160', '180'],
 flags.DEFINE_float('l2', 3e-4, 'L2 coefficient.')
 flags.DEFINE_enum(
     'dataset', 'cifar10', enum_values=['cifar10', 'cifar100'], help='Dataset.')
-# TODO(ghassen): consider adding CIFAR-100-C to TFDS.
 flags.DEFINE_string(
     'cifar100_c_path', '',
     'Path to the TFRecords files for CIFAR-100-C. Only valid '
@@ -78,7 +70,7 @@ flags.DEFINE_string(
 flags.DEFINE_integer('train_epochs', 250, 'Number of training epochs.')
 
 # Accelerator flags.
-flags.DEFINE_bool('use_gpu', True, 'Whether to run on GPU or otherwise TPU.')
+flags.DEFINE_bool('use_gpu', False, 'Whether to run on GPU or otherwise TPU.')
 flags.DEFINE_bool('use_bfloat16', False, 'Whether to use mixed precision.')
 flags.DEFINE_integer('num_cores', 8, 'Number of TPU cores or number of GPUs.')
 flags.DEFINE_string('tpu', None,
@@ -101,7 +93,42 @@ def main(argv):
     resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=FLAGS.tpu)
     tf.config.experimental_connect_to_cluster(resolver)
     tf.tpu.experimental.initialize_tpu_system(resolver)
-    strategy = tf.distribute.TPUStrategy(resolver)
+    strategy = tf.distribute.experimental.TPUStrategy(resolver)
+
+  train_input_fn = utils.load_input_fn(
+      split=tfds.Split.TRAIN,
+      name=FLAGS.dataset,
+      batch_size=FLAGS.per_core_batch_size // FLAGS.batch_repetitions,
+      use_bfloat16=FLAGS.use_bfloat16)
+  clean_test_input_fn = utils.load_input_fn(
+      split=tfds.Split.TEST,
+      name=FLAGS.dataset,
+      batch_size=FLAGS.per_core_batch_size,
+      use_bfloat16=FLAGS.use_bfloat16)
+  train_dataset = strategy.experimental_distribute_datasets_from_function(
+      train_input_fn)
+  test_datasets = {
+      'clean':
+          strategy.experimental_distribute_datasets_from_function(
+              clean_test_input_fn),
+  }
+  if FLAGS.corruptions_interval > 0:
+    if FLAGS.dataset == 'cifar10':
+      load_c_input_fn = utils.load_cifar10_c_input_fn
+    else:
+      load_c_input_fn = functools.partial(
+          utils.load_cifar100_c_input_fn, path=FLAGS.cifar100_c_path)
+    corruption_types, max_intensity = utils.load_corrupted_test_info(
+        FLAGS.dataset)
+    for corruption in corruption_types:
+      for intensity in range(1, max_intensity + 1):
+        input_fn = load_c_input_fn(
+            corruption_name=corruption,
+            corruption_intensity=intensity,
+            batch_size=FLAGS.per_core_batch_size,
+            use_bfloat16=FLAGS.use_bfloat16)
+        test_datasets['{0}_{1}'.format(corruption, intensity)] = (
+            strategy.experimental_distribute_datasets_from_function(input_fn))
 
   ds_info = tfds.builder(FLAGS.dataset).info
   train_batch_size = FLAGS.per_core_batch_size * FLAGS.num_cores // FLAGS.batch_repetitions
@@ -111,43 +138,9 @@ def main(argv):
   steps_per_eval = ds_info.splits['test'].num_examples // test_batch_size
   num_classes = ds_info.features['label'].num_classes
 
-  if FLAGS.dataset == 'cifar10':
-    dataset_builder_class = ub.datasets.Cifar10Dataset
-  else:
-    dataset_builder_class = ub.datasets.Cifar100Dataset
-  train_dataset_builder = dataset_builder_class(
-      split=tfds.Split.TRAIN,
-      use_bfloat16=FLAGS.use_bfloat16)
-  train_dataset = train_dataset_builder.load(batch_size=train_batch_size)
-  train_dataset = strategy.experimental_distribute_dataset(train_dataset)
-  clean_test_dataset_builder = dataset_builder_class(
-      split=tfds.Split.TEST,
-      use_bfloat16=FLAGS.use_bfloat16)
-  clean_test_dataset = clean_test_dataset_builder.load(
-      batch_size=test_batch_size)
-  test_datasets = {
-      'clean': strategy.experimental_distribute_dataset(clean_test_dataset),
-  }
-  if FLAGS.corruptions_interval > 0:
-    if FLAGS.dataset == 'cifar10':
-      load_c_dataset = utils.load_cifar10_c
-    else:
-      load_c_dataset = functools.partial(utils.load_cifar100_c,
-                                         path=FLAGS.cifar100_c_path)
-    corruption_types, max_intensity = utils.load_corrupted_test_info(
-        FLAGS.dataset)
-    for corruption in corruption_types:
-      for intensity in range(1, max_intensity + 1):
-        dataset = load_c_dataset(
-            corruption_name=corruption,
-            corruption_intensity=intensity,
-            batch_size=test_batch_size,
-            use_bfloat16=FLAGS.use_bfloat16)
-        test_datasets['{0}_{1}'.format(corruption, intensity)] = (
-            strategy.experimental_distribute_dataset(dataset))
-
   if FLAGS.use_bfloat16:
-    tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+    policy = tf.keras.mixed_precision.experimental.Policy('mixed_bfloat16')
+    tf.keras.mixed_precision.experimental.set_policy(policy)
 
   summary_writer = tf.summary.create_file_writer(
       os.path.join(FLAGS.output_dir, 'summaries'))
@@ -168,12 +161,10 @@ def main(argv):
     base_lr = FLAGS.base_learning_rate * train_batch_size / 128
     lr_decay_epochs = [(int(start_epoch_str) * FLAGS.train_epochs) // 200
                        for start_epoch_str in FLAGS.lr_decay_epochs]
-    lr_schedule = ub.schedules.WarmUpPiecewiseConstantSchedule(
-        steps_per_epoch,
-        base_lr,
-        decay_ratio=FLAGS.lr_decay_ratio,
-        decay_epochs=lr_decay_epochs,
-        warmup_epochs=FLAGS.lr_warmup_epochs)
+    lr_schedule = utils.LearningRateSchedule(steps_per_epoch, base_lr,
+                                             FLAGS.lr_decay_ratio,
+                                             lr_decay_epochs,
+                                             FLAGS.lr_warmup_epochs)
     optimizer = tf.keras.optimizers.SGD(
         lr_schedule, momentum=0.9, nesterov=True)
     metrics = {
@@ -184,7 +175,6 @@ def main(argv):
         'test/negative_log_likelihood': tf.keras.metrics.Mean(),
         'test/accuracy': tf.keras.metrics.SparseCategoricalAccuracy(),
         'test/ece': um.ExpectedCalibrationError(num_bins=FLAGS.num_bins),
-        'test/diversity': rm.metrics.AveragePairwiseDiversity(),
     }
     if FLAGS.corruptions_interval > 0:
       corrupt_metrics = {}
@@ -202,6 +192,11 @@ def main(argv):
       metrics['test/nll_member_{}'.format(i)] = tf.keras.metrics.Mean()
       metrics['test/accuracy_member_{}'.format(i)] = (
           tf.keras.metrics.SparseCategoricalAccuracy())
+    test_diversity = {
+        'test/disagreement': tf.keras.metrics.Mean(),
+        'test/average_kl': tf.keras.metrics.Mean(),
+        'test/cosine_similarity': tf.keras.metrics.Mean(),
+    }
 
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
     latest_checkpoint = tf.train.latest_checkpoint(FLAGS.output_dir)
@@ -287,7 +282,10 @@ def main(argv):
 
       if dataset_name == 'clean':
         per_probs = tf.transpose(probs, perm=[1, 0, 2])
-        metrics['test/diversity'].add_batch(per_probs)
+        diversity_results = um.average_pairwise_diversity(
+            per_probs, FLAGS.ensemble_size)
+        for k, v in diversity_results.items():
+          test_diversity['test/' + k].update_state(v)
 
       for i in range(FLAGS.ensemble_size):
         member_probs = probs[:, i]
@@ -379,17 +377,14 @@ def main(argv):
           metrics['test/nll_member_{}'.format(i)].result(),
           metrics['test/accuracy_member_{}'.format(i)].result() * 100)
 
+    metrics.update(test_diversity)
     total_results = {name: metric.result() for name, metric in metrics.items()}
     total_results.update(corrupt_results)
-    # Results from Robustness Metrics themselves return a dict, so flatten them.
-    total_results = utils.flatten_dictionary(total_results)
     with summary_writer.as_default():
       for name, result in total_results.items():
         tf.summary.scalar(name, result, step=epoch + 1)
 
-    for _, metric in metrics.items():
-      metric.reset_states()
-    for _, metric in corrupt_metrics.items():
+    for metric in metrics.values():
       metric.reset_states()
 
     if (FLAGS.checkpoint_interval > 0 and

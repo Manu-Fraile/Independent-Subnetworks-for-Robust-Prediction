@@ -16,7 +16,8 @@
 # Lint as: python3
 """Wide ResNet architecture with multiple input and outputs."""
 import functools
-from experimental.mimo import layers  # local file import
+# from experimental.mimo import layers  # local file import
+import layers # FIXED: instead import the layers file in same folder
 import tensorflow as tf
 
 BatchNormalization = functools.partial(  # pylint: disable=invalid-name
