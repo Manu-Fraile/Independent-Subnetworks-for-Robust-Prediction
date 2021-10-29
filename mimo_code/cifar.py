@@ -219,6 +219,9 @@ def main(argv):
 
     def step_fn(inputs):
       """Per-Replica StepFn."""
+      # TODO: this is the part generating error currently! 
+      # The error is in row 225, but switching for row 224 generates later error..
+      # images, _, labels = inputs
       images, labels = inputs
       batch_size = tf.shape(images)[0]
 
