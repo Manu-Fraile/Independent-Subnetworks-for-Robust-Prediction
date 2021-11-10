@@ -151,7 +151,9 @@ def main(argv):
 
     summary_writer = tf.summary.create_file_writer(
         os.path.join(FLAGS.output_dir, 'summaries'))
-
+    
+    print([FLAGS.ensemble_size] +
+                        list(ds_info.features['image'].shape))
     with strategy.scope():
         logging.info('Building Keras model')
         model = cifar_model.wide_resnet(
@@ -277,7 +279,8 @@ def main(argv):
 
         def step_fn(inputs):
             """Per-Replica StepFn."""
-            images, labels = inputs
+            #images, labels = inputs
+            images, _, labels = inputs.values()
             images = tf.tile(
                 tf.expand_dims(images, 1), [1, FLAGS.ensemble_size, 1, 1, 1])
             logits = model(images, training=False)

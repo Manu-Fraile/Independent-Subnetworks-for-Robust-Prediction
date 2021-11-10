@@ -25,15 +25,18 @@ from absl import app
 from absl import flags
 from absl import logging
 
-import cifar_model  # ADDED
+import mnist_model  # ADDED
 # REMOVED from experimental.mimo import cifar_model  # local file import
 import robustness_metrics as rm
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import uncertainty_baselines as ub
-import baselines.utils as utils  # ADDED this!
+import baselines.utils_new as utils  # ADDED this!
 # from uncertainty_baselines.baselines.cifar import utils
 import uncertainty_metrics as um
+
+physical_devices = tf.config.list_physical_devices('GPU')
+tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 flags.DEFINE_integer('ensemble_size', 4, 'Size of ensemble.')
 flags.DEFINE_float('input_repetition_probability', 0.0,
@@ -57,25 +60,25 @@ flags.DEFINE_list('lr_decay_epochs', ['80', '160', '180'],
                   'Epochs to decay learning rate by.')
 flags.DEFINE_float('l2', 3e-4, 'L2 coefficient.')
 flags.DEFINE_enum(
-    'dataset', 'mnist', help='Dataset.')
+    'dataset', 'mnist', enum_values=['cifar10', 'cifar100', 'mnist'], help='Dataset.')
 # TODO(ghassen): consider adding CIFAR-100-C to TFDS.
 flags.DEFINE_string(
     'cifar100_c_path', '',
     'Path to the TFRecords files for CIFAR-100-C. Only valid '
     '(and required) if dataset is cifar100 and corruptions.')
 flags.DEFINE_integer(
-    'corruptions_interval', 250,
+    'corruptions_interval', 50,
     'Number of epochs between evaluating on the corrupted '
     'test data. Use -1 to never evaluate.')
 flags.DEFINE_integer(
-    'checkpoint_interval', -1,
+    'checkpoint_interval', 50,
     'Number of epochs between saving checkpoints. Use -1 to '
     'never save checkpoints.')
 flags.DEFINE_integer('num_bins', 15, 'Number of bins for ECE.')
 flags.DEFINE_string(
-    'output_dir', '/tmp/cifar', 'The directory where the model weights and '
+    'output_dir', '/tmp/mnist', 'The directory where the model weights and '
                                 'training/evaluation summaries are stored.')
-flags.DEFINE_integer('train_epochs', 250, 'Number of training epochs.')
+flags.DEFINE_integer('train_epochs', 100, 'Number of training epochs.')
 
 # Accelerator flags.
 flags.DEFINE_bool('use_gpu', True, 'Whether to run on GPU or otherwise TPU.')
@@ -110,21 +113,21 @@ def main(argv):
     steps_per_epoch = train_dataset_size // train_batch_size
     steps_per_eval = ds_info.splits['test'].num_examples // test_batch_size
     num_classes = ds_info.features['label'].num_classes
-
+    
     if FLAGS.dataset == 'cifar10':
         dataset_builder_class = ub.datasets.Cifar10Dataset
     elif FLAGS.dataset == 'cifar10':
         dataset_builder_class = ub.datasets.Cifar100Dataset
     elif FLAGS.dataset == 'mnist':
-        dataset_builder_class = ub.datasets.Mnist
+        dataset_builder_class = ub.datasets.MnistDataset
     train_dataset_builder = dataset_builder_class(
-        split=tfds.Split.TRAIN,
-        use_bfloat16=FLAGS.use_bfloat16)
+        split=tfds.Split.TRAIN)
+        #use_bfloat16=FLAGS.use_bfloat16)
     train_dataset = train_dataset_builder.load(batch_size=train_batch_size)
     train_dataset = strategy.experimental_distribute_dataset(train_dataset)
     clean_test_dataset_builder = dataset_builder_class(
-        split=tfds.Split.TEST,
-        use_bfloat16=FLAGS.use_bfloat16)
+        split=tfds.Split.TEST)
+        #use_bfloat16=FLAGS.use_bfloat16)
     clean_test_dataset = clean_test_dataset_builder.load(
         batch_size=test_batch_size)
     test_datasets = {
@@ -137,7 +140,7 @@ def main(argv):
             load_c_dataset = functools.partial(utils.load_cifar100_c,
                                                path=FLAGS.cifar100_c_path)
         elif FLAGS.dataset == 'mnist':
-            load_c_dataset = utils.load_minst_c
+            load_c_dataset = utils.load_mnist_c
 
         corruption_types, max_intensity = utils.load_corrupted_test_info(
             FLAGS.dataset)
@@ -156,16 +159,19 @@ def main(argv):
 
     summary_writer = tf.summary.create_file_writer(
         os.path.join(FLAGS.output_dir, 'summaries'))
-
+    print([FLAGS.ensemble_size] +
+                        list(ds_info.features['image'].shape))
     with strategy.scope():
         logging.info('Building Keras model')
-        model = cifar_model.wide_resnet(
+        model = mnist_model.wide_resnet(
             input_shape=[FLAGS.ensemble_size] +
                         list(ds_info.features['image'].shape),
             depth=28,
             width_multiplier=FLAGS.width_multiplier,
             num_classes=num_classes,
             ensemble_size=FLAGS.ensemble_size)
+        
+        #model.summary()
         logging.info('Model input shape: %s', model.input_shape)
         logging.info('Model output shape: %s', model.output_shape)
         logging.info('Model number of weights: %s', model.count_params())
@@ -224,7 +230,7 @@ def main(argv):
 
         def step_fn(inputs):
             """Per-Replica StepFn."""
-            images, _, labels = inputs.values()
+            images, labels = inputs.values()
             batch_size = tf.shape(images)[0]
 
             main_shuffle = tf.random.shuffle(tf.tile(
@@ -282,7 +288,7 @@ def main(argv):
 
         def step_fn(inputs):
             """Per-Replica StepFn."""
-            images, labels = inputs
+            images, labels = inputs.values()
             images = tf.tile(
                 tf.expand_dims(images, 1), [1, FLAGS.ensemble_size, 1, 1, 1])
             logits = model(images, training=False)

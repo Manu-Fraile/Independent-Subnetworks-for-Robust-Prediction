@@ -171,6 +171,44 @@ def load_cifar10_c(corruption_name,
   return dataset
 
 
+def load_mnist_c(corruption_name,
+                   corruption_intensity,
+                   batch_size,
+                   use_bfloat16,
+                   drop_remainder=False,
+                   normalize=True):
+  """Loads mnist-C dataset."""
+  if use_bfloat16:
+    dtype = tf.bfloat16
+  else:
+    dtype = tf.float32
+  corruption = corruption_name #+ '_' + str(corruption_intensity)
+  def preprocess(image, label):
+    image = tf.image.convert_image_dtype(image, dtype)
+    if normalize:
+      # We use the convention of mean = np.mean(train_images, axis=(0,1,2))
+      # and std = np.std(train_images, axis=(0,1,2)).
+      mean = tf.constant([0.1307], dtype=dtype)
+      std = tf.constant([0.3081], dtype=dtype)
+      # Previously, std = np.mean(np.std(train_images, axis=(1, 2)), axis=0)
+      # which gave std = tf.constant([0.2023, 0.1994, 0.2010], dtype=dtype).
+      # However, we change convention to use the std over the entire training
+      # set instead.
+      image = (image - mean) / std
+    label = tf.cast(label, dtype)
+    return image, label
+
+  dataset = tfds.load(name='mnist_corrupted/{}'.format(corruption),
+                      split=tfds.Split.TEST,
+                      as_supervised=True,
+                      download=True)
+  dataset = dataset.map(
+      preprocess, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+  dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
+  dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+  return dataset
+
+
 # TODO(ghassen,trandustin): Push this metadata upstream to TFDS.
 def load_corrupted_test_info(dataset):
   """Loads information for CIFAR-10-C."""
