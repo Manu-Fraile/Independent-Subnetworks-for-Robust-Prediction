@@ -230,6 +230,7 @@ def load_corrupted_test_info(dataset):
         'pixelate',
         'jpeg_compression',
     ]
+    max_intensity = 5
   elif dataset=='cifar100':
     corruption_types = [
         'brightness',
@@ -250,6 +251,7 @@ def load_corrupted_test_info(dataset):
         'speckle_noise',  # Does not exist for CIFAR-10.
         'zoom_blur',
     ]
+    max_intensity = 5
   elif dataset =='mnist':
     corruption_types = ['identity',
                 'shot_noise',
@@ -268,7 +270,7 @@ def load_corrupted_test_info(dataset):
                 'zigzag',
                 'canny_edges',]
 
-  max_intensity = 5
+    max_intensity = 1
   return corruption_types, max_intensity
 
 

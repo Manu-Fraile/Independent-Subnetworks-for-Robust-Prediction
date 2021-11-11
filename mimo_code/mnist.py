@@ -288,7 +288,7 @@ def main(argv):
 
         def step_fn(inputs):
             """Per-Replica StepFn."""
-            images, labels = inputs.values()
+            images, labels = inputs
             images = tf.tile(
                 tf.expand_dims(images, 1), [1, FLAGS.ensemble_size, 1, 1, 1])
             logits = model(images, training=False)
