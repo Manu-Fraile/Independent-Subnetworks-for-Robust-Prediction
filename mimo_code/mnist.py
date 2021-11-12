@@ -76,7 +76,7 @@ flags.DEFINE_integer(
     'never save checkpoints.')
 flags.DEFINE_integer('num_bins', 15, 'Number of bins for ECE.')
 flags.DEFINE_string(
-    'output_dir', '/tmp/mnist', 'The directory where the model weights and '
+    'output_dir', '/home/jupyter/mnist', 'The directory where the model weights and '
                                 'training/evaluation summaries are stored.')
 flags.DEFINE_integer('train_epochs', 100, 'Number of training epochs.')
 
