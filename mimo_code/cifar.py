@@ -39,7 +39,7 @@ flags.DEFINE_integer('ensemble_size', 4, 'Size of ensemble.')
 flags.DEFINE_float('input_repetition_probability', 0.0,
                    'The probability that the inputs are identical for the'
                    'ensemble members.')
-flags.DEFINE_integer('width_multiplier', 10, 'Integer to multiply the number of'
+flags.DEFINE_integer('width_multiplier', 1, 'Integer to multiply the number of'
                                              'typical filters by. "k" in ResNet-n-k.')
 flags.DEFINE_integer('per_core_batch_size', 64, 'Batch size per TPU core/GPU.')
 flags.DEFINE_integer('batch_repetitions', 4, 'Number of times an example is'
@@ -64,7 +64,7 @@ flags.DEFINE_string(
     'Path to the TFRecords files for CIFAR-100-C. Only valid '
     '(and required) if dataset is cifar100 and corruptions.')
 flags.DEFINE_integer(
-    'corruptions_interval', 250,
+    'corruptions_interval', 1,
     'Number of epochs between evaluating on the corrupted '
     'test data. Use -1 to never evaluate.')
 flags.DEFINE_integer(
@@ -75,7 +75,7 @@ flags.DEFINE_integer('num_bins', 15, 'Number of bins for ECE.')
 flags.DEFINE_string(
     'output_dir', '/home/jupyter/cifar', 'The directory where the model weights and '
                                 'training/evaluation summaries are stored.')
-flags.DEFINE_integer('train_epochs', 250, 'Number of training epochs.')
+flags.DEFINE_integer('train_epochs', 2, 'Number of training epochs.')
 
 # Accelerator flags.
 flags.DEFINE_bool('use_gpu', True, 'Whether to run on GPU or otherwise TPU.')
@@ -325,6 +325,58 @@ def main(argv):
 
         strategy.run(step_fn, args=(next(iterator),))
 
+    @tf.function
+    def test_step_c(iterator, dataset_name):
+        """Evaluation StepFn."""
+
+        def step_fn(inputs):
+            """Per-Replica StepFn."""
+            #images, labels = inputs
+            images, labels = inputs
+            images = tf.tile(
+                tf.expand_dims(images, 1), [1, FLAGS.ensemble_size, 1, 1, 1])
+            logits = model(images, training=False)
+            if FLAGS.use_bfloat16:
+                logits = tf.cast(logits, tf.float32)
+            probs = tf.nn.softmax(logits)
+
+            if dataset_name == 'clean':
+                per_probs = tf.transpose(probs, perm=[1, 0, 2])
+                metrics['test/diversity'].add_batch(per_probs)
+
+            for i in range(FLAGS.ensemble_size):
+                member_probs = probs[:, i]
+                member_loss = tf.keras.losses.sparse_categorical_crossentropy(
+                    labels, member_probs)
+                metrics['test/nll_member_{}'.format(i)].update_state(member_loss)
+                metrics['test/accuracy_member_{}'.format(i)].update_state(
+                    labels, member_probs)
+
+            # Negative log marginal likelihood computed in a numerically-stable way.
+            labels_tiled = tf.tile(
+                tf.expand_dims(labels, 1), [1, FLAGS.ensemble_size])
+            log_likelihoods = -tf.keras.losses.sparse_categorical_crossentropy(
+                labels_tiled, logits, from_logits=True)
+            negative_log_likelihood = tf.reduce_mean(
+                -tf.reduce_logsumexp(log_likelihoods, axis=[1]) +
+                tf.math.log(float(FLAGS.ensemble_size)))
+            probs = tf.math.reduce_mean(probs, axis=1)  # marginalize
+
+            if dataset_name == 'clean':
+                metrics['test/negative_log_likelihood'].update_state(
+                    negative_log_likelihood)
+                metrics['test/accuracy'].update_state(labels, probs)
+                metrics['test/ece'].update_state(labels, probs)
+            else:
+                corrupt_metrics['test/nll_{}'.format(dataset_name)].update_state(
+                    negative_log_likelihood)
+                corrupt_metrics['test/accuracy_{}'.format(dataset_name)].update_state(
+                    labels, probs)
+                corrupt_metrics['test/ece_{}'.format(dataset_name)].update_state(
+                    labels, probs)
+
+        strategy.run(step_fn, args=(next(iterator),))
+
     metrics.update({'test/ms_per_example': tf.keras.metrics.Mean()})
 
     train_iterator = iter(train_dataset)
@@ -354,14 +406,25 @@ def main(argv):
         for dataset_name, test_dataset in datasets_to_evaluate.items():
             test_iterator = iter(test_dataset)
             logging.info('Testing on dataset %s', dataset_name)
-            for step in range(steps_per_eval):
-                if step % 20 == 0:
-                    logging.info('Starting to run eval step %s of epoch: %s', step, epoch)
-                test_start_time = time.time()
-                test_step(test_iterator, dataset_name)
-                ms_per_example = (time.time() - test_start_time) * 1e6 / test_batch_size
-                metrics['test/ms_per_example'].update_state(ms_per_example)
-            logging.info('Done with testing on %s', dataset_name)
+            if dataset_name =="clean":
+                for step in range(steps_per_eval):
+                    if step % 20 == 0:
+                        logging.info('Starting to run eval step %s of epoch: %s', step, epoch)
+                    test_start_time = time.time()
+                    test_step(test_iterator, dataset_name)
+                    ms_per_example = (time.time() - test_start_time) * 1e6 / test_batch_size
+                    metrics['test/ms_per_example'].update_state(ms_per_example)
+                logging.info('Done with testing on %s', dataset_name)
+            else:
+                for step in range(steps_per_eval):
+                    if step % 20 == 0:
+                        logging.info('Starting to run eval step %s of epoch: %s', step, epoch)
+                    test_start_time = time.time()
+                    test_step_c(test_iterator, dataset_name)
+                    ms_per_example = (time.time() - test_start_time) * 1e6 / test_batch_size
+                    metrics['test/ms_per_example'].update_state(ms_per_example)
+                logging.info('Done with testing on %s', dataset_name)
+
 
         corrupt_results = {}
         if (FLAGS.corruptions_interval > 0 and

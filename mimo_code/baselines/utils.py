@@ -277,8 +277,10 @@ def aggregate_corrupt_metrics(metrics,
       acc[i] = metrics['{0}/accuracy_{1}'.format(prefix, dataset_name)].result()
       # TODO(dusenberrymw): rm.ECE returns a dictionary with a single item. Can
       # this be cleaned up?
-      ece[i] = list(metrics['{0}/ece_{1}'.format(
-          prefix, dataset_name)].result().values())[0]
+#      ece[i] = list(metrics['{0}/ece_{1}'.format(
+#          prefix, dataset_name)].result().values())[0]
+      ece[i] = metrics['{0}/ece_{1}'.format(
+          prefix, dataset_name)].result()
       if '{0}/member_acc_mean_{1}'.format(prefix,
                                           dataset_name) in metrics.keys():
         member_acc[i] = metrics['{0}/member_acc_mean_{1}'.format(

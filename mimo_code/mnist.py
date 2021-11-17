@@ -38,7 +38,7 @@ import uncertainty_metrics as um
 physical_devices = tf.config.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-flags.DEFINE_integer('ensemble_size', 4, 'Size of ensemble.')
+flags.DEFINE_integer('ensemble_size', 3, 'Size of ensemble.')
 flags.DEFINE_float('input_repetition_probability', 0.0,
                    'The probability that the inputs are identical for the'
                    'ensemble members.')
@@ -76,9 +76,9 @@ flags.DEFINE_integer(
     'never save checkpoints.')
 flags.DEFINE_integer('num_bins', 15, 'Number of bins for ECE.')
 flags.DEFINE_string(
-    'output_dir', '/home/jupyter/mnist', 'The directory where the model weights and '
+    'output_dir', '/home/jupyter/mnist/M3', 'The directory where the model weights and '
                                 'training/evaluation summaries are stored.')
-flags.DEFINE_integer('train_epochs', 100, 'Number of training epochs.')
+flags.DEFINE_integer('train_epochs', 200, 'Number of training epochs.')
 
 # Accelerator flags.
 flags.DEFINE_bool('use_gpu', True, 'Whether to run on GPU or otherwise TPU.')
@@ -288,6 +288,57 @@ def main(argv):
 
         def step_fn(inputs):
             """Per-Replica StepFn."""
+            images, labels = inputs.values()
+            images = tf.tile(
+                tf.expand_dims(images, 1), [1, FLAGS.ensemble_size, 1, 1, 1])
+            logits = model(images, training=False)
+            if FLAGS.use_bfloat16:
+                logits = tf.cast(logits, tf.float32)
+            probs = tf.nn.softmax(logits)
+
+            if dataset_name == 'clean':
+                per_probs = tf.transpose(probs, perm=[1, 0, 2])
+                metrics['test/diversity'].add_batch(per_probs)
+
+            for i in range(FLAGS.ensemble_size):
+                member_probs = probs[:, i]
+                member_loss = tf.keras.losses.sparse_categorical_crossentropy(
+                    labels, member_probs)
+                metrics['test/nll_member_{}'.format(i)].update_state(member_loss)
+                metrics['test/accuracy_member_{}'.format(i)].update_state(
+                    labels, member_probs)
+
+            # Negative log marginal likelihood computed in a numerically-stable way.
+            labels_tiled = tf.tile(
+                tf.expand_dims(labels, 1), [1, FLAGS.ensemble_size])
+            log_likelihoods = -tf.keras.losses.sparse_categorical_crossentropy(
+                labels_tiled, logits, from_logits=True)
+            negative_log_likelihood = tf.reduce_mean(
+                -tf.reduce_logsumexp(log_likelihoods, axis=[1]) +
+                tf.math.log(float(FLAGS.ensemble_size)))
+            probs = tf.math.reduce_mean(probs, axis=1)  # marginalize
+
+            if dataset_name == 'clean':
+                metrics['test/negative_log_likelihood'].update_state(
+                    negative_log_likelihood)
+                metrics['test/accuracy'].update_state(labels, probs)
+                metrics['test/ece'].update_state(labels, probs)
+            else:
+                corrupt_metrics['test/nll_{}'.format(dataset_name)].update_state(
+                    negative_log_likelihood)
+                corrupt_metrics['test/accuracy_{}'.format(dataset_name)].update_state(
+                    labels, probs)
+                corrupt_metrics['test/ece_{}'.format(dataset_name)].update_state(
+                    labels, probs)
+
+        strategy.run(step_fn, args=(next(iterator),))
+        
+    @tf.function
+    def test_step_c(iterator, dataset_name):
+        """Evaluation StepFn. for corr"""
+
+        def step_fn(inputs):
+            """Per-Replica StepFn."""
             images, labels = inputs
             images = tf.tile(
                 tf.expand_dims(images, 1), [1, FLAGS.ensemble_size, 1, 1, 1])
@@ -333,6 +384,7 @@ def main(argv):
 
         strategy.run(step_fn, args=(next(iterator),))
 
+
     metrics.update({'test/ms_per_example': tf.keras.metrics.Mean()})
 
     train_iterator = iter(train_dataset)
@@ -362,14 +414,24 @@ def main(argv):
         for dataset_name, test_dataset in datasets_to_evaluate.items():
             test_iterator = iter(test_dataset)
             logging.info('Testing on dataset %s', dataset_name)
-            for step in range(steps_per_eval):
-                if step % 20 == 0:
-                    logging.info('Starting to run eval step %s of epoch: %s', step, epoch)
-                test_start_time = time.time()
-                test_step(test_iterator, dataset_name)
-                ms_per_example = (time.time() - test_start_time) * 1e6 / test_batch_size
-                metrics['test/ms_per_example'].update_state(ms_per_example)
-            logging.info('Done with testing on %s', dataset_name)
+            if dataset_name =="clean":
+                for step in range(steps_per_eval):
+                    if step % 20 == 0:
+                        logging.info('Starting to run eval step %s of epoch: %s', step, epoch)
+                    test_start_time = time.time()
+                    test_step(test_iterator, dataset_name)
+                    ms_per_example = (time.time() - test_start_time) * 1e6 / test_batch_size
+                    metrics['test/ms_per_example'].update_state(ms_per_example)
+                logging.info('Done with testing on %s', dataset_name)
+            else:
+                for step in range(steps_per_eval):
+                    if step % 20 == 0:
+                        logging.info('Starting to run eval step %s of epoch: %s', step, epoch)
+                    test_start_time = time.time()
+                    test_step_c(test_iterator, dataset_name)
+                    ms_per_example = (time.time() - test_start_time) * 1e6 / test_batch_size
+                    metrics['test/ms_per_example'].update_state(ms_per_example)
+                logging.info('Done with testing on %s', dataset_name)
 
         corrupt_results = {}
         if (FLAGS.corruptions_interval > 0 and
