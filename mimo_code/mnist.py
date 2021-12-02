@@ -38,13 +38,13 @@ import uncertainty_metrics as um
 physical_devices = tf.config.list_physical_devices('GPU')
 tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-flags.DEFINE_integer('ensemble_size', 3, 'Size of ensemble.')
+flags.DEFINE_integer('ensemble_size', 6, 'Size of ensemble.')
 flags.DEFINE_float('input_repetition_probability', 0.0,
                    'The probability that the inputs are identical for the'
                    'ensemble members.')
-flags.DEFINE_integer('width_multiplier', 10, 'Integer to multiply the number of'
+flags.DEFINE_integer('width_multiplier', 2, 'Integer to multiply the number of'
                                              'typical filters by. "k" in ResNet-n-k.')
-flags.DEFINE_integer('per_core_batch_size', 64, 'Batch size per TPU core/GPU.')
+flags.DEFINE_integer('per_core_batch_size', 128, 'Batch size per TPU core/GPU.')
 flags.DEFINE_integer('batch_repetitions', 4, 'Number of times an example is'
                                              'repeated in a training batch. More repetitions lead to'
                                              'lower variance gradients and increased training time.')
@@ -76,7 +76,7 @@ flags.DEFINE_integer(
     'never save checkpoints.')
 flags.DEFINE_integer('num_bins', 15, 'Number of bins for ECE.')
 flags.DEFINE_string(
-    'output_dir', '/home/jupyter/mnist/M3', 'The directory where the model weights and '
+    'output_dir', '/home/jupyter/mnist/WRN28-2/M6', 'The directory where the model weights and '
                                 'training/evaluation summaries are stored.')
 flags.DEFINE_integer('train_epochs', 200, 'Number of training epochs.')
 
