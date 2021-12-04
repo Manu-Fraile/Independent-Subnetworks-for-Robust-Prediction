@@ -1,5 +1,6 @@
-fimport functools
+import functools
 import os
+import numpy as np
 import time
 from absl import app
 from absl import flags
@@ -14,150 +15,178 @@ import uncertainty_baselines as ub
 import baselines.utils_new as utils  # ADDED this!
 # from uncertainty_baselines.baselines.cifar import utils
 import uncertainty_metrics as um
-flags.DEFINE_integer('seed', 0, 'Random seed.')
-
-flags.DEFINE_string(
-    'NN_dir', '/home/jupyter/mnist/WRN28-2/M4', 'The directory where the model weights and '
-                                'training/evaluation summaries are stored.')
-# Accelerator flags.
-flags.DEFINE_bool('use_gpu', True, 'Whether to run on GPU or otherwise TPU.')
-flags.DEFINE_bool('use_bfloat16', False, 'Whether to use mixed precision.')
-flags.DEFINE_integer('num_cores', 8, 'Number of TPU cores or number of GPUs.')
-flags.DEFINE_string('tpu', None,
-                    'Name of the TPU. Only used if use_gpu is False.')
-FLAGS = flags.FLAGS
 
 
-def main(argv):
-    del argv  # unused arg
+import numpy as np
+import os
+import random
+from collections import defaultdict
+import matplotlib.pyplot as plt
+from scipy.stats import entropy
+import seaborn as sns
+import pickle as pkl
 
-    tf.random.set_seed(FLAGS.seed)
 
-    if FLAGS.use_gpu:
-        logging.info('Use GPU')
-        strategy = tf.distribute.MirroredStrategy()
-    else:
-        logging.info('Use TPU at %s',
-                     FLAGS.tpu if FLAGS.tpu is not None else 'local')
-        resolver = tf.distribute.cluster_resolver.TPUClusterResolver(tpu=FLAGS.tpu)
-        tf.config.experimental_connect_to_cluster(resolver)
-        tf.tpu.experimental.initialize_tpu_system(resolver)
-        strategy = tf.distribute.TPUStrategy(resolver)
+import argparse
 
-    ds_info = tfds.builder(FLAGS.dataset).info
-    train_batch_size = FLAGS.per_core_batch_size * FLAGS.num_cores // FLAGS.batch_repetitions
-    test_batch_size = FLAGS.per_core_batch_size * FLAGS.num_cores
-    train_dataset_size = ds_info.splits['train'].num_examples
-    steps_per_epoch = train_dataset_size // train_batch_size
-    steps_per_eval = ds_info.splits['test'].num_examples // test_batch_size
-    num_classes = ds_info.features['label'].num_classes
-    
-    if FLAGS.dataset == 'cifar10':
-        dataset_builder_class = ub.datasets.Cifar10Dataset
-    elif FLAGS.dataset == 'cifar10':
-        dataset_builder_class = ub.datasets.Cifar100Dataset
-    elif FLAGS.dataset == 'mnist':
-        dataset_builder_class = ub.datasets.MnistDataset
-    train_dataset_builder = dataset_builder_class(
-        split=tfds.Split.TRAIN)
-        #use_bfloat16=FLAGS.use_bfloat16)
-    # train_dataset = train_dataset_builder.load(batch_size=train_batch_size)
-    # train_dataset = strategy.experimental_distribute_dataset(train_dataset)
-    clean_test_dataset_builder = dataset_builder_class(
-        split=tfds.Split.TEST)
-        #use_bfloat16=FLAGS.use_bfloat16)
-    clean_test_dataset = clean_test_dataset_builder.load(
-        batch_size=test_batch_size)
-    test_datasets = {
-        'clean': strategy.experimental_distribute_dataset(clean_test_dataset),
-    }
-    if FLAGS.corruptions_interval > 0:
-        if FLAGS.dataset == 'cifar10':
-            load_c_dataset = utils.load_cifar10_c
-        elif FLAGS.dataset == 'cifar10':
-            load_c_dataset = functools.partial(utils.load_cifar100_c,
-                                               path=FLAGS.cifar100_c_path)
-        elif FLAGS.dataset == 'mnist':
-            load_c_dataset = utils.load_mnist_c
+parser = argparse.ArgumentParser()
 
-        corruption_types, max_intensity = utils.load_corrupted_test_info(
-            FLAGS.dataset)
-        for corruption in corruption_types:
-            for intensity in range(1, max_intensity + 1):
-                dataset = load_c_dataset(
-                    corruption_name=corruption,
-                    corruption_intensity=intensity,
-                    batch_size=test_batch_size,
-                    use_bfloat16=FLAGS.use_bfloat16)
-                test_datasets['{0}_{1}'.format(corruption, intensity)] = (
-                    strategy.experimental_distribute_dataset(dataset))
+parser.add_argument("--ensemble", help="ensemble size.", default=1,type=int)
 
-    if FLAGS.use_bfloat16:
-        tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+args = parser.parse_args()
+ensemble_size = args.ensemble
 
-    summary_writer = tf.summary.create_file_writer(
-        os.path.join(FLAGS.output_dir, 'summaries'))
-    print([FLAGS.ensemble_size] +
-                        list(ds_info.features['image'].shape))
-    with strategy.scope():
-        logging.info('Building Keras model')
-        model = mnist_model.wide_resnet(
-            input_shape=[FLAGS.ensemble_size] +
-                        list(ds_info.features['image'].shape),
-            depth=28,
-            width_multiplier=FLAGS.width_multiplier,
-            num_classes=num_classes,
-            ensemble_size=FLAGS.ensemble_size)
+
+def load_not_mnist(im_root,batch_size):
+    dirs = os.listdir(im_root)
+    label_dict = defaultdict()
+
+    filenames=[]
+    labels=[]
+    for idx, dr in enumerate(dirs):
+        # print(dr)
+        label_dict[idx] = dr
+        ims = os.listdir(os.path.join(im_root, dr))
+        random.shuffle(ims)
+        for im in (ims):
+            if im=="RGVtb2NyYXRpY2FCb2xkT2xkc3R5bGUgQm9sZC50dGY=.png" or im== "Q3Jvc3NvdmVyIEJvbGRPYmxpcXVlLnR0Zg==.png":
+                continue
+            # # 
+            # image_string = tf.io.read_file(os.path.join(im_root, dr, im))
+            # try:
+            #     tf.io.decode_image(image_string)
+            # except:
+            #     print(im)
+            #     continue
+            else:
+                filenames.append(os.path.join(im_root, dr, im))
+                labels.append(idx)
         
-        #model.summary()
-        logging.info('Model input shape: %s', model.input_shape)
-        logging.info('Model output shape: %s', model.output_shape)
-        logging.info('Model number of weights: %s', model.count_params())
-        # Linearly scale learning rate and the decay epochs by vanilla settings.
-        base_lr = FLAGS.base_learning_rate * train_batch_size / 128
-        lr_decay_epochs = [(int(start_epoch_str) * FLAGS.train_epochs) // 200
-                           for start_epoch_str in FLAGS.lr_decay_epochs]
-        lr_schedule = ub.schedules.WarmUpPiecewiseConstantSchedule(
-            steps_per_epoch,
-            base_lr,
-            decay_ratio=FLAGS.lr_decay_ratio,
-            decay_epochs=lr_decay_epochs,
-            warmup_epochs=FLAGS.lr_warmup_epochs)
-        optimizer = tf.keras.optimizers.SGD(
-            lr_schedule, momentum=0.9, nesterov=True)
-        metrics = {
-            'train/negative_log_likelihood': tf.keras.metrics.Mean(),
-            'train/accuracy': tf.keras.metrics.SparseCategoricalAccuracy(),
-            'train/loss': tf.keras.metrics.Mean(),
-            'train/ece': um.ExpectedCalibrationError(num_bins=FLAGS.num_bins),
-            'test/negative_log_likelihood': tf.keras.metrics.Mean(),
-            'test/accuracy': tf.keras.metrics.SparseCategoricalAccuracy(),
-            'test/ece': um.ExpectedCalibrationError(num_bins=FLAGS.num_bins),
-            'test/diversity': rm.metrics.AveragePairwiseDiversity(),
-        }
-        if FLAGS.corruptions_interval > 0:
-            corrupt_metrics = {}
-            for intensity in range(1, max_intensity + 1):
-                for corruption in corruption_types:
-                    dataset_name = '{0}_{1}'.format(corruption, intensity)
-                    corrupt_metrics['test/nll_{}'.format(dataset_name)] = (
-                        tf.keras.metrics.Mean())
-                    corrupt_metrics['test/accuracy_{}'.format(dataset_name)] = (
-                        tf.keras.metrics.SparseCategoricalAccuracy())
-                    corrupt_metrics['test/ece_{}'.format(dataset_name)] = (
-                        um.ExpectedCalibrationError(num_bins=FLAGS.num_bins))
+    filenames = tf.constant(filenames)
+    labels = tf.constant(labels) 
+    dataset = tf.data.Dataset.from_tensor_slices((filenames, labels))
 
-        for i in range(FLAGS.ensemble_size):
-            metrics['test/nll_member_{}'.format(i)] = tf.keras.metrics.Mean()
-            metrics['test/accuracy_member_{}'.format(i)] = (
-                tf.keras.metrics.SparseCategoricalAccuracy())
+    def _parse_function(filename, label):
 
-        checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-        latest_checkpoint = tf.train.latest_checkpoint(FLAGS.output_dir)
-        initial_epoch = 0
-        if latest_checkpoint:
-            # checkpoint.restore must be within a strategy.scope() so that optimizer
-            # slot variables are mirrored.
-            checkpoint.restore(latest_checkpoint)
-            logging.info('Loaded checkpoint %s', latest_checkpoint)
-            initial_epoch = optimizer.iterations.numpy() // steps_per_epoch
+        normalize=True
+        dtype = tf.float32
+
+        image_string = tf.io.read_file(filename)
+        image = tf.io.decode_image(image_string, dtype=dtype)
+
+        # image = tf.image.convert_image_dtype(image_decoded, dtype)
+        if normalize:
+            # We use the convention of mean = np.mean(train_images, axis=(0,1,2))
+            # and std = np.std(train_images, axis=(0,1,2)).
+            mean = tf.constant([0.1307], dtype=dtype)
+            std = tf.constant([0.3081], dtype=dtype)
+            # Previously, std = np.mean(np.std(train_images, axis=(1, 2)), axis=0)
+            # which gave std = tf.constant([0.2023, 0.1994, 0.2010], dtype=dtype).
+            # However, we change convention to use the std over the entire training
+            # set instead.
+            image = (image - mean) / std
+        label = tf.cast(label, dtype)
+        return image, label
+
+    dataset = dataset.map(_parse_function)
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    return dataset
+
+
+### LOAD DATASETS
+test_datasets={}
+test_batch_size=500
+N_mnist = 10000
+N_NOTmnist = 18710
+
+dataset_builder_class = ub.datasets.MnistDataset
+clean_test_dataset_builder = dataset_builder_class(split=tfds.Split.TEST)
+
+clean_test_dataset = clean_test_dataset_builder.load(batch_size=test_batch_size)
+test_datasets = {'clean': clean_test_dataset,}
+
+load_c_dataset = utils.load_mnist_c
+
+corruption_types, max_intensity = utils.load_corrupted_test_info("mnist")
+for corruption in corruption_types[:]:
+    for intensity in range(1, max_intensity + 1):
+        dataset = load_c_dataset(
+            corruption_name=corruption,
+            corruption_intensity=intensity,
+            batch_size=test_batch_size,
+            use_bfloat16=False)
+
+        test_datasets['{0}_{1}'.format(corruption, intensity)] = (
+            # strategy.experimental_distribute_dataset(dataset))
+            dataset)
+
+not_minst_root = '/Users/benna/Desktop/DLA/dataset/notMNIST_small'
+not_mnist_dataset= load_not_mnist(not_minst_root,test_batch_size)
+test_datasets['notMNIST'] =  not_mnist_dataset
+
+# acc=tf.keras.metrics.SparseCategoricalAccuracy()
+
+#@tf.function
+def test_step(test_iterator, dataset_name):
+    if  dataset_name == 'clean':
+        images, label = next(test_iterator).values()
+    else:
+        images, label = next(test_iterator)
+
+    images = tf.tile(tf.expand_dims(images, 1), [1, ensemble_size, 1, 1, 1])
+    logits = model(images, training=False)
+    probs = tf.nn.softmax(logits)
+    # print(probs.shape)
+    probs = tf.math.reduce_mean(probs, axis=1)  # marginalize
+    # acc.update_state(label, probs)
+    # print(probs.shape)
+    entr=entropy(probs,base=10,axis=1)
+    # print(entr)
+    # plt.hist(entr, histtype="step", align="left",bins=np.arange(-0.5,2.5,0.5))
+    return entr
+
+
+### TEST
+
+
+output_dir="/Users/benna/Desktop/DLA/OOD-detection-using-MIMO/MNIST_NN/M"+str(ensemble_size)+"/"
+
+image_shape=[28,28,1]
+width_multiplier=2 
+num_classes=10
+
+model = mnist_model.wide_resnet(
+    input_shape=[ensemble_size] +
+                image_shape,
+    depth=28,
+    width_multiplier=width_multiplier,
+    num_classes=num_classes,
+    ensemble_size=ensemble_size)
+
+optimizer = tf.keras.optimizers.SGD( momentum=0.9, nesterov=True)
+checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+latest_checkpoint = tf.train.latest_checkpoint(output_dir)
+checkpoint.restore(latest_checkpoint)
+
+
+Entropies=defaultdict()
+
+datasets_to_evaluate = test_datasets
+
+for dataset_name, test_dataset in datasets_to_evaluate.items():
+    entropy_test=[]
+    test_iterator = iter(test_dataset)
+    print('Testing on dataset %s', dataset_name)
+
+    if dataset_name == "notMNIST":
+        N_images = N_NOTmnist
+    else:
+        N_images = N_mnist
+    entropy_test=[]
+    for _ in range(N_images//test_batch_size):
+        entropy_test.append(test_step(test_iterator, dataset_name))
+    entropy_test = np.reshape(entropy_test, (-1,1))
+    Entropies['M{0}_{1}'.format(ensemble_size, dataset_name)] = entropy_test
+
+
+pkl.dump( Entropies, open( "Entropies_M"+str(ensemble_size)+".pkl", "wb" ) )
