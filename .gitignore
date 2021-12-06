@@ -136,3 +136,6 @@ dmypy.json
 
 # PyCharm files
 .idea/
+
+# Ignore heavy file (download manually)
+MNIST_NN/WRN28-10-M3/*
