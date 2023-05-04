@@ -1,4 +1,12 @@
 # Out Of Distribution detection using MIMO
+Deep neural networks can help to solve complex tasks, but understanding the processes within neural networks and estimating the uncertainty of predictions is
+difficult. The MIMO architecture introduces a method that adds minimal additional computational cost compared to other techniques for uncertainty estimation. In
+this project we reproduce some of the key results from the original MIMO paper, in some cases using untested architecture changes and datasets. Additionally, we
+conduct new experiments on OOD detection where we use predictive entropy to evaluate the quality of the uncertainty estimates. Our results indicate that the results
+obtained in the original paper are reproducible, and also give promising results on our new experiments.
+
+This work received the maximum possible grade, an A.
+
 
 ## Install dependenices for original MIMO implementation
 1. Activate a virtual environment by running `python3 -m venv venv`
